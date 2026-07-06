@@ -24,3 +24,5 @@ Thumbs.db
 # Temporary and submission files
 *.zip
 *.log
+
+docker_cheat_sheet.txt
