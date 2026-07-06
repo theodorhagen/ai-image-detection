@@ -1,0 +1,9 @@
+docker build -t amls-ai-image-detection:dev ./solution
+
+docker run --rm \
+  --cpus 8 \
+  --network none \
+  -v "$(pwd)/solution/data:/workspace/solution/data:ro" \
+  -v "$(pwd)/solution/artifacts:/workspace/solution/artifacts" \
+  amls-ai-image-detection:dev \
+  python clean.py --timeout_seconds 600

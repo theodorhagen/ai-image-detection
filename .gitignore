@@ -1,0 +1,26 @@
+# Dataset and generated artifacts
+solution/data/
+solution/artifacts/
+
+# Local Python environments
+.venv/
+venv/
+
+# Python cache files
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Editors and operating systems
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Temporary and submission files
+*.zip
+*.log
