@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import pyarrow.parquet as pq
 from tqdm import tqdm
@@ -22,10 +23,17 @@ from src.image_utils import read_image_info
 from src.paths import get_project_paths
 from src.reporting import (
     ensure_dir,
+    save_aspect_ratio_histogram,
+    save_categorical_percentage_plot,
     save_class_distribution_plot,
+    save_class_percentage_plot,
     save_encoded_size_boxplot,
+    save_encoded_size_boxplot_log,
     save_image_size_scatter,
+    save_image_size_scatter_by_label,
+    save_megapixels_boxplot,
     save_source_class_distribution_plot,
+    save_source_class_percentage_plot,
     write_csv,
     write_json,
     write_parquet,
@@ -91,6 +99,90 @@ def process_labeled_split(
     return records
 
 
+def add_derived_columns(metadata: pd.DataFrame) -> pd.DataFrame:
+    """Add derived metadata columns for shortcut and cleaning analysis."""
+
+    metadata = metadata.copy()
+
+    numeric_columns = [
+        "source_class",
+        "binary_label",
+        "image_bytes",
+        "width",
+        "height",
+        "row_index",
+    ]
+    for column in numeric_columns:
+        metadata[column] = pd.to_numeric(metadata[column], errors="coerce")
+
+    metadata["decode_ok"] = metadata["decode_ok"].astype(bool)
+    metadata["is_clean"] = metadata["is_clean"].astype(bool)
+
+    metadata["aspect_ratio"] = np.where(
+        (metadata["decode_ok"]) & (metadata["height"] > 0),
+        metadata["width"] / metadata["height"],
+        np.nan,
+    )
+    metadata["megapixels"] = np.where(
+        metadata["decode_ok"],
+        (metadata["width"] * metadata["height"]) / 1_000_000.0,
+        np.nan,
+    )
+    metadata["is_square"] = (
+        (metadata["decode_ok"])
+        & (metadata["width"].notna())
+        & (metadata["height"].notna())
+        & (metadata["width"] == metadata["height"])
+    )
+    metadata["label_name"] = metadata["binary_label"].map({0: "real", 1: "ai_generated"})
+    metadata["aspect_bucket"] = pd.cut(
+        metadata["aspect_ratio"],
+        bins=[0.0, 0.8, 0.95, 1.05, 1.25, np.inf],
+        labels=[
+            "portrait",
+            "near_portrait",
+            "near_square",
+            "near_landscape",
+            "landscape",
+        ],
+        include_lowest=True,
+    )
+
+    return metadata
+
+
+def add_percent_within_group(
+    dataframe: pd.DataFrame,
+    group_columns: list[str],
+    count_column: str = "count",
+    percent_column: str = "percentage",
+) -> pd.DataFrame:
+    """Add a percentage column normalized within selected grouping columns."""
+
+    dataframe = dataframe.copy()
+    totals = dataframe.groupby(group_columns)[count_column].transform("sum")
+    dataframe[percent_column] = np.where(totals > 0, dataframe[count_column] / totals * 100.0, 0.0)
+    return dataframe
+
+
+def categorical_distribution(
+    metadata: pd.DataFrame,
+    column: str,
+    group_columns: list[str],
+) -> pd.DataFrame:
+    """Build a categorical count and percentage table."""
+
+    table = (
+        metadata[metadata["decode_ok"]]
+        .assign(**{column: metadata[column].fillna("unknown").astype(str)})
+        .groupby([*group_columns, column], dropna=False)
+        .size()
+        .reset_index(name="count")
+        .sort_values([*group_columns, column])
+    )
+    return add_percent_within_group(table, group_columns)
+
+
 def build_summaries(metadata: pd.DataFrame) -> dict[str, pd.DataFrame]:
     """Build tabular summaries used in the report."""
 
@@ -103,6 +195,8 @@ def build_summaries(metadata: pd.DataFrame) -> dict[str, pd.DataFrame]:
             mean_width=("width", "mean"),
             mean_height=("height", "mean"),
             mean_encoded_bytes=("image_bytes", "mean"),
+            median_aspect_ratio=("aspect_ratio", "median"),
+            square_image_rate=("is_square", "mean"),
         )
         .reset_index()
     )
@@ -113,6 +207,15 @@ def build_summaries(metadata: pd.DataFrame) -> dict[str, pd.DataFrame]:
         .reset_index(name="count")
         .sort_values(["split", "source_class"])
     )
+    class_distribution = add_percent_within_group(class_distribution, ["split"])
+
+    binary_class_distribution = (
+        metadata.groupby(["split", "binary_label"], dropna=False)
+        .size()
+        .reset_index(name="count")
+        .sort_values(["split", "binary_label"])
+    )
+    binary_class_distribution = add_percent_within_group(binary_class_distribution, ["split"])
 
     image_size_summary = (
         metadata[metadata["decode_ok"]]
@@ -125,12 +228,43 @@ def build_summaries(metadata: pd.DataFrame) -> dict[str, pd.DataFrame]:
             min_height=("height", "min"),
             median_height=("height", "median"),
             max_height=("height", "max"),
+            median_aspect_ratio=("aspect_ratio", "median"),
+            median_megapixels=("megapixels", "median"),
             median_encoded_bytes=("image_bytes", "median"),
+            square_image_rate=("is_square", "mean"),
         )
         .reset_index()
     )
 
-    error_summary = (
+    dimension_shortcut_summary = (
+        metadata[metadata["decode_ok"]]
+        .groupby(["split", "source_class", "binary_label"], dropna=False)
+        .agg(
+            n_images=("split", "size"),
+            median_width=("width", "median"),
+            median_height=("height", "median"),
+            median_aspect_ratio=("aspect_ratio", "median"),
+            median_megapixels=("megapixels", "median"),
+            median_encoded_bytes=("image_bytes", "median"),
+            square_image_rate=("is_square", "mean"),
+        )
+        .reset_index()
+        .sort_values(["split", "source_class"])
+    )
+
+    aspect_bucket_distribution = (
+        metadata[metadata["decode_ok"]]
+        .groupby(["split", "binary_label", "aspect_bucket"], dropna=False, observed=False)
+        .size()
+        .reset_index(name="count")
+        .sort_values(["split", "binary_label", "aspect_bucket"])
+    )
+    aspect_bucket_distribution = add_percent_within_group(
+        aspect_bucket_distribution,
+        ["split", "binary_label"],
+    )
+
+    decode_error_summary = (
         metadata[~metadata["decode_ok"]]
         .groupby(["split", "error_type"], dropna=False)
         .size()
@@ -138,11 +272,28 @@ def build_summaries(metadata: pd.DataFrame) -> dict[str, pd.DataFrame]:
         .sort_values(["split", "error_type"])
     )
 
+    format_distribution = categorical_distribution(
+        metadata,
+        column="image_format",
+        group_columns=["split", "binary_label"],
+    )
+
+    mode_distribution = categorical_distribution(
+        metadata,
+        column="mode",
+        group_columns=["split", "binary_label"],
+    )
+
     return {
         "split_summary": split_summary,
         "class_distribution": class_distribution,
+        "binary_class_distribution": binary_class_distribution,
         "image_size_summary": image_size_summary,
-        "decode_error_summary": error_summary,
+        "dimension_shortcut_summary": dimension_shortcut_summary,
+        "aspect_bucket_distribution": aspect_bucket_distribution,
+        "format_distribution": format_distribution,
+        "mode_distribution": mode_distribution,
+        "decode_error_summary": decode_error_summary,
     }
 
 
@@ -166,16 +317,37 @@ def write_outputs(metadata: pd.DataFrame, artifacts_dir: Path) -> None:
             "binary_label",
             "width",
             "height",
+            "aspect_ratio",
+            "megapixels",
             "image_bytes",
         ]
     ].copy()
     write_parquet(clean_train_index, task_dir / "clean_train_index.parquet")
 
     write_json(CLEANING_CONFIG, task_dir / "cleaning_config.json")
+
     save_class_distribution_plot(metadata, figures_dir / "class_distribution.png")
+    save_class_percentage_plot(metadata, figures_dir / "class_distribution_percent.png")
     save_source_class_distribution_plot(metadata, figures_dir / "source_class_distribution.png")
+    save_source_class_percentage_plot(metadata, figures_dir / "source_class_distribution_percent.png")
     save_image_size_scatter(metadata, figures_dir / "image_size_distribution.png")
+    save_image_size_scatter_by_label(metadata, figures_dir / "image_size_distribution_by_label.png")
     save_encoded_size_boxplot(metadata, figures_dir / "encoded_size_by_label.png")
+    save_encoded_size_boxplot_log(metadata, figures_dir / "encoded_size_by_label_log.png")
+    save_aspect_ratio_histogram(metadata, figures_dir / "aspect_ratio_by_label.png")
+    save_megapixels_boxplot(metadata, figures_dir / "megapixels_by_label.png")
+    save_categorical_percentage_plot(
+        metadata,
+        column="image_format",
+        path=figures_dir / "image_format_distribution.png",
+        title="Image-format distribution by binary label",
+    )
+    save_categorical_percentage_plot(
+        metadata,
+        column="mode",
+        path=figures_dir / "image_mode_distribution.png",
+        title="Image-mode distribution by binary label",
+    )
 
 
 def main() -> None:
@@ -203,7 +375,7 @@ def main() -> None:
             )
         )
 
-    metadata = pd.DataFrame.from_records(all_records)
+    metadata = add_derived_columns(pd.DataFrame.from_records(all_records))
     write_outputs(metadata, paths.artifacts_dir)
 
     print(f"timeout_seconds={args.timeout_seconds}")
