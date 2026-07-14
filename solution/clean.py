@@ -40,13 +40,14 @@ from src.reporting import (
 )
 
 
-def parse_args() -> argparse.Namespace:
-    """Parse command-line arguments."""
+CLEAN_BATCH_SIZE = 512
+MAX_IMAGES_PER_SPLIT = None
 
+
+def parse_args() -> argparse.Namespace:
+    """Parse the evaluator-provided runtime limit."""
     parser = argparse.ArgumentParser()
-    parser.add_argument("--timeout_seconds", type=int, required=True)
-    parser.add_argument("--batch_size", type=int, default=512)
-    parser.add_argument("--max_images_per_split", type=int, default=None)
+    parser.add_argument("--timeout_seconds", type=float, required=True)
     return parser.parse_args()
 
 
@@ -370,8 +371,8 @@ def main() -> None:
             process_labeled_split(
                 split=split,
                 data_dir=paths.data_dir,
-                batch_size=args.batch_size,
-                max_images=args.max_images_per_split,
+                batch_size=CLEAN_BATCH_SIZE,
+                max_images=MAX_IMAGES_PER_SPLIT,
             )
         )
 
