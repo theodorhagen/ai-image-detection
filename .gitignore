@@ -1,6 +1,7 @@
 # Dataset and generated artifacts
 solution/data/
 solution/artifacts/
+submission
 
 # Local Python environments
 .venv/
